@@ -19,3 +19,4 @@ class L2Switch(app_manager.RyuApp):
             datapath=dp, buffer_id=msg.buffer_id, in_port=msg.in_port,
             actions=actions)
         dp.send_msg(out)
+        print("git")
