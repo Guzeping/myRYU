@@ -16,9 +16,9 @@ class ARP_proxy(app_manager.RyuApp):
         super(ARP_proxy, self).__init__(*args, **kwargs)
         self.mac2Port = {}
         self.ip2mac = {}
-        self.switches = {}       #dpid->datapath
-        self.request_queue = {}  # record arp request .e.g.{"10.0.0.2":["10.0.0.1","10.0.0.3"]}
-        #                          "10.0.0.3":["10.0.0.4"]}
+        self.dpid2datapath = {}  # dpid->datapath
+        self.request_queue = {}  # record arp request:{requested IP:{askIP:askIPtoDPid}} .e.g.{"10.0.0.2":{"10.0.0.1":"1","10.0.0.3","2"}}
+        #                          "10.0.0.3":{"10.0.0.4","3"}}
 
     def encapsulate_ARP_reply(self, src_mac, src_ip, dst_mac, dst_ip):
         ARP = packet.Packet()
@@ -71,7 +71,7 @@ class ARP_proxy(app_manager.RyuApp):
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        self.switches[datapath.id] = datapath
+        self.dpid2datapath[datapath.id] = datapath
 
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, 0xff11)]
@@ -129,7 +129,7 @@ class ARP_proxy(app_manager.RyuApp):
         self.logger.info("\npacket in dpid:%s src:%s dst:%s in_port:%s ", dpid, src, dst, in_port)
 
         self.mac2Port[dpid][src] = in_port
-        self.logger.info("set mac:%s to dpid:%s port:%s", src, dpid,in_port)
+        self.logger.info("set mac:%s to dpid:%s port:%s", src, dpid, in_port)
         self.logger.info("Current mac2Port for this switch")
         self.printMac2Port(dpid)
 
@@ -170,57 +170,58 @@ class ARP_proxy(app_manager.RyuApp):
                     # append request to request_queue
                     self.logger.info("      miss cache,broadcast!")
                     if dst_ip in self.request_queue.keys():
-                        self.request_queue[dst_ip].add(src_ip)
+
+                        self.request_queue[dst_ip].setdefault(src_ip, dpid)
                     else:
-                        self.request_queue.setdefault(dst_ip, {src_ip})
+                        self.request_queue.setdefault(dst_ip, {src_ip: dpid})
                         # flood
                         arp_request = self.encapsulate_ARP_request(src_mac=broadcast_mac,
                                                                    src_ip=broadcast_ip,
                                                                    dst_ip=dst_ip)
                         actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD, 0)]
-                        for sw_dpid in self.switches:
-                            self.logger.info("      broad dpid:%s", sw_dpid)
-                            out = parser.OFPPacketOut(datapath=self.switches[sw_dpid],
-                                                      buffer_id=self.switches[sw_dpid].ofproto.OFP_NO_BUFFER,
-                                                      in_port=self.switches[sw_dpid].ofproto.OFPP_CONTROLLER,
+                        for sw_dpid in self.dpid2datapath:
+                            self.logger.info("      broadcast to dpid:%s", sw_dpid)
+                            out = parser.OFPPacketOut(datapath=self.dpid2datapath[sw_dpid],
+                                                      buffer_id=self.dpid2datapath[sw_dpid].ofproto.OFP_NO_BUFFER,
+                                                      in_port=self.dpid2datapath[sw_dpid].ofproto.OFPP_CONTROLLER,
                                                       actions=actions, data=arp_request.data)
-                            self.switches[sw_dpid].send_msg(out)
+                            self.dpid2datapath[sw_dpid].send_msg(out)
 
                     # print request_queue
                     self.logger.info("      request_queue:")
                     for arp_request_Ip in self.request_queue:
                         self.logger.info("      request_ip:%s ->", arp_request_Ip)
-                        for need_to_answer in self.request_queue[arp_request_Ip]:
-                            self.logger.info("          %s", need_to_answer)
+                        for key, value in self.request_queue[arp_request_Ip].items():
+                            self.logger.info("          %s in dpid %s", key, value)
                     self.logger.info("")
 
             # arp_reply
             elif arp_packet.opcode == arp.ARP_REPLY:
-                # todo:handle reply
                 self.logger.info("      handling arp_reply!")
-                # find information of pengding_ip and encapsulate the arp_reply and sent to the respective port of switch
-                #for pending_ip in self.request_queue[src_ip]:
-                while self.request_queue[src_ip].__len__() !=0:
-                    # todo  find information of pengding_ip and encapsulate the arp_reply and sent to the respective port of switch
+                # find information of pending_ip and encapsulate the arp_reply and sent to the respective port of switch
+                # for pending_ip in self.request_queue[src_ip]:
+                while self.request_queue[src_ip].__len__() != 0:
                     # find information of pending_ip:
-                    pending_ip=self.request_queue[src_ip].pop()
+                    pending_ip, pending_dpid = self.request_queue[src_ip].popitem()
                     pending_mac = self.ip2mac[pending_ip]
-                    pending_dpid, pending_port = self.find_dpid_and_port_by_mac(pending_mac)
-                    self.logger.info("      find  pending_ip:%s, pending_mac:%s in dpid :%s in port:%s for requested_ip:%s",
-                                     pending_ip, pending_mac, pending_dpid, pending_port, src_ip)
+                    pending_port = self.mac2Port[pending_dpid][pending_mac]
+                    self.logger.info(
+                        "      find  pending_ip:%s, pending_mac:%s in dpid :%s in port:%s for requested_ip:%s",
+                        pending_ip, pending_mac, pending_dpid, pending_port, src_ip)
 
                     arp_reply = self.encapsulate_ARP_reply(src_mac=src_mac, src_ip=src_ip,
                                                            dst_mac=pending_mac, dst_ip=pending_ip)
 
                     # encapsulate the arp_reply and sent to the respective port of switch
-                    self.logger.info("      encapsulate ARP reply and sent to dpid:%s port:%s!\n", pending_dpid, pending_port)
-                    actions = [self.switches[pending_dpid].ofproto_parser.OFPActionOutput(pending_port, 0)]
-                    out = self.switches[pending_dpid].ofproto_parser.OFPPacketOut(
-                            datapath=self.switches[pending_dpid],
-                            buffer_id=self.switches[pending_dpid].ofproto.OFP_NO_BUFFER,
-                            in_port=self.switches[pending_dpid].ofproto.OFPP_CONTROLLER,
+                    self.logger.info("      encapsulate ARP reply and sent to dpid:%s port:%s!\n", pending_dpid,
+                                     pending_port)
+                    actions = [self.dpid2datapath[pending_dpid].ofproto_parser.OFPActionOutput(pending_port, 0)]
+                    out = self.dpid2datapath[pending_dpid].ofproto_parser.OFPPacketOut(
+                            datapath=self.dpid2datapath[pending_dpid],
+                            buffer_id=self.dpid2datapath[pending_dpid].ofproto.OFP_NO_BUFFER,
+                            in_port=self.dpid2datapath[pending_dpid].ofproto.OFPP_CONTROLLER,
                             actions=actions, data=arp_reply.data)
-                    self.switches[pending_dpid].send_msg(out)
+                    self.dpid2datapath[pending_dpid].send_msg(out)
 
                 self.request_queue.pop(src_ip)
             return
@@ -229,8 +230,8 @@ class ARP_proxy(app_manager.RyuApp):
             out_put = self.mac2Port[dpid][dst]
             match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
             actions = [parser.OFPActionOutput(out_put)]
-            self.logger.info("add flow to dpid:%s,in_port=%s,dl_dst=dst,ouput=%s",
-                             dpid,in_port,out_put)
+            self.logger.info("add flow to dpid:%s,in_port=%s,dl_dst=%s,ouput=%s",
+                             dpid, in_port, dst, out_put)
             self.add_flow(datapath=datapath, priority=1, match=match,
                           actions=actions)
 
