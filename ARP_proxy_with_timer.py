@@ -4,6 +4,8 @@ from ryu.controller.handler import MAIN_DISPATCHER, CONFIG_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet, ethernet, ether_types, arp
+from ryu.topology import event
+from ryu.topology.api import get_switch
 
 broadcast_mac = "88:88:88:88:88:88"  # special MAC to sent arp_request by controller
 broadcast_ip = '10.10.10.10'  # special IP to sent arp_request by controller
@@ -11,6 +13,10 @@ broadcast_ip = '10.10.10.10'  # special IP to sent arp_request by controller
 
 class ARP_proxy(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
+    events = [event.EventSwitchEnter,
+              event.EventSwitchLeave, event.EventPortAdd,
+              event.EventPortDelete, event.EventPortModify,
+              event.EventLinkAdd, event.EventLinkDelete]
 
     def __init__(self, *args, **kwargs):
         super(ARP_proxy, self).__init__(*args, **kwargs)
@@ -62,6 +68,13 @@ class ARP_proxy(app_manager.RyuApp):
         for mac, port in self.mac2Port[dpid].items():
             self.logger.info("mac=%s port=%d" % (mac, port))
         self.logger.info("")
+
+    @set_ev_cls(events)
+    def get_topology(self, ev):
+        switch_list = get_switch(self, None)
+        for sw in  switch_list:
+
+            self.logger.info("switch:%s",sw.dp.id)
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
