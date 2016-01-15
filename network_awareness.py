@@ -17,6 +17,8 @@ from ryu.lib import hub
 from ryu.topology import event, switches
 from ryu.topology.api import get_switch, get_link
 
+import PP_network_awareness
+
 SLEEP_PERIOD = 10
 IS_UPDATE = True
 
@@ -24,6 +26,7 @@ IS_UPDATE = True
 class Network_Aware(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
     _NAME = 'network_aware'
+
 
     def __init__(self, *args, **kwargs):
         super(Network_Aware, self).__init__(*args, **kwargs)
@@ -112,7 +115,7 @@ class Network_Aware(app_manager.RyuApp):
                     self.graph[src][dst] = float('inf')
         return self.graph
 
-        
+
 
     def create_port_map(self, switch_list):
         for sw in switch_list:

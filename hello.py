@@ -1,22 +1,46 @@
-from ryu.base import app_manager
-from ryu.controller import ofp_event
-from ryu.controller.handler import MAIN_DISPATCHER
-from ryu.controller.handler import set_ev_cls
+class Test(object):
+    def __init__(self, name, age):
+        """
 
-class L2Switch(app_manager.RyuApp):
-    def __init__(self, *args, **kwargs):
-        super(L2Switch, self).__init__(*args, **kwargs)
+        """
+        self.name = name
+        self.ages = age
 
-    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
-    def packet_in_handler(self, ev):
-        msg = ev.msg
-        dp = msg.datapath
-        ofp = dp.ofproto
-        ofp_parser = dp.ofproto_parser
+    def add_age(self, ages):
+        print "ages:", ages
+        print "self.ages:", self.ages
+        ages[1] += 1
+        print "ages:", ages
+        print "self.ages:", self.ages
+        # for age in ages:
+        #     age += 1
+        #     print "age:", age
 
-        actions = [ofp_parser.OFPActionOutput(ofp.OFPP_FLOOD)]
-        out = ofp_parser.OFPPacketOut(
-            datapath=dp, buffer_id=msg.buffer_id, in_port=msg.in_port,
-            actions=actions)
-        dp.send_msg(out)
-        print("git")
+
+test = Test("PP", {1: {1: 1}, 2: {2: 2}})
+test.add_age(test.ages[1].copy())
+
+
+def append_list(x):
+    x.append(5)
+
+
+def add_numb(x):
+    x += 1
+
+
+a = [1, 2, 3, 4]
+b = [1, 2, 3, 4]
+print"a:", a
+
+append_list(a)
+print "after append_list(a) a:", a
+
+print"b:", b
+
+add_numb(b[0])
+print "after add_numb(b[0]):", b
+
+def add(x):
+    a=x[1]
+    a+=1

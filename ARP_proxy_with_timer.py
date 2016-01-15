@@ -3,12 +3,41 @@ from ryu.controller import ofp_event
 from ryu.controller.handler import MAIN_DISPATCHER, CONFIG_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.ofproto import ofproto_v1_3
-from ryu.lib.packet import packet, ethernet, ether_types, arp
+from ryu.lib.packet import packet, ethernet, ether_types, arp, ipv4
 from ryu.topology import event
-from ryu.topology.api import get_switch
+import time
+import PP_network_awareness
 
 broadcast_mac = "88:88:88:88:88:88"  # special MAC to sent arp_request by controller
 broadcast_ip = '10.10.10.10'  # special IP to sent arp_request by controller
+enable_time = 10
+
+
+class Host(object):
+    def __init__(self, dpid, port_no, mac):
+        self.dpid = dpid
+        self.port_no = port_no
+        self.mac = mac
+        self.ipv4 = []
+
+
+class Host_info(object):
+    def __init__(self, mac, ip):
+        self.ip = ip
+        self.mac = mac
+        self.stamp = time.time()
+        self.enabled = True
+
+    def is_enable(self):
+        if self.enabled == True and time.time() - self.stamp <= enable_time:
+            return True
+        else:
+            self.enabled = False
+            return False
+
+    def update_stamp(self):
+        self.stamp = time.time()
+        self.enabled = True
 
 
 class ARP_proxy(app_manager.RyuApp):
@@ -17,12 +46,26 @@ class ARP_proxy(app_manager.RyuApp):
               event.EventSwitchLeave, event.EventPortAdd,
               event.EventPortDelete, event.EventPortModify,
               event.EventLinkAdd, event.EventLinkDelete]
+    _CONTEXTS = {"PP_network_awareness": PP_network_awareness.PP_network_awareness}
 
     def __init__(self, *args, **kwargs):
         super(ARP_proxy, self).__init__(*args, **kwargs)
-        self.mac2Port = {}
-        self.ip2mac = {}
-        self.dpid2datapath = {}  # dpid->datapath
+        self.PP_network_awareness = kwargs["PP_network_awareness"]
+        # links : {(src_dpid,dst_dpid):(src_port,dst_port)}
+        self.links = self.PP_network_awareness.links
+
+        # dpid->set(port num) (access: link to host directly)
+        self.access_port = self.PP_network_awareness.access_port
+
+        # switches connection matrix
+        self.dp_map = self.PP_network_awareness.dp_map
+        # mac->host
+        self.hosts = {}
+
+        # ip->host_info
+        self.ip2host_info = {}
+
+        self.dpid2dp = {}  # dpid->datapath
         self.request_queue = {}  # record arp request:{requested IP:{askIP:askIPtoDPid}} .e.g.{"10.0.0.2":{"10.0.0.1":"1","10.0.0.3","2"}}
         #                          "10.0.0.3":{"10.0.0.4","3"}}
 
@@ -35,6 +78,204 @@ class ARP_proxy(app_manager.RyuApp):
         ARP.serialize()
         return ARP
 
+    def arp_request_handler(self,arp_packet):
+        self.logger.info("      handling arp_request!")
+
+        # init
+        src_ip=arp_packet.src_ip
+        src_mac=arp_packet.src_mac
+        src_dpid=self.hosts[src_mac].dpid
+        in_port=self.hosts[src_mac].port_no
+        datapath=self.dpid2dp[src_dpid]
+        parser=datapath.ofproto_parser
+        ofproto=datapath.ofproto
+        dst_ip=arp_packet.dst_ip
+
+        # hit the cache
+        if dst_ip in self.ip2host_info:
+            self.logger.info("      hit cache!")
+            dst_mac = self.ip2host_info[dst_ip].mac
+            if self.ip2host_info[dst_ip].is_enable():
+                #  host_info enabled! encapsulate and ARP reply and sent
+                self.logger.info("      the cache enbaled!")
+                arp_reply = self.encapsulate_ARP_reply(src_mac=dst_mac, src_ip=dst_ip,
+                                                       dst_mac=src_mac, dst_ip=src_ip)
+
+                self.logger.info("      encapsulate ARP reply and sent!\n")
+                actions = [parser.OFPActionOutput(in_port, 0)]
+                out = parser.OFPPacketOut(datapath=self.dpid2dp[src_dpid],
+                                          buffer_id=ofproto.OFP_NO_BUFFER,
+                                          in_port=ofproto.OFPP_CONTROLLER,
+                                          actions=actions, data=arp_reply.data)
+                # install path
+                print"      install path"
+                path = self.find_shortest_path(src_mac, dst_mac)
+                self.install_path_flow(src_mac, dst_mac, path)
+                print"      install finish"
+                # path.reverse()
+                # self.install_path_flow(dst_mac, src_mac, path)
+                time.sleep(0.01)
+                datapath.send_msg(out)
+            else:
+                self.logger.info("          the cache disabled,sent request to the requested host")
+                if dst_ip in self.request_queue.keys():
+                    self.request_queue[dst_ip].setdefault(src_ip, src_dpid)
+                else:
+                    self.request_queue.setdefault(dst_ip, {src_ip: src_dpid})
+                    dst_port = self.hosts[dst_mac].port_no
+                    dst_dpid = self.hosts[dst_mac].dpid
+                    actions = [parser.OFPActionOutput(dst_port, 0)]
+                    print "          mac:", dst_mac
+                    print "          dpid:%s,port:%s" % (dst_dpid, dst_port)
+                    arp_request = self.encapsulate_ARP_request(src_mac=broadcast_mac,
+                                                               src_ip=broadcast_ip,
+                                                               dst_ip=dst_ip)
+                    out = parser.OFPPacketOut(datapath=self.dpid2dp[dst_dpid],
+                                              buffer_id=ofproto.OFP_NO_BUFFER,
+                                              in_port=ofproto.OFPP_CONTROLLER,
+                                              actions=actions, data=arp_request.data)
+                    self.dpid2dp[dst_dpid].send_msg(out)
+                # print request_queue
+                self.logger.info("      request_queue:")
+                for arp_request_Ip in self.request_queue:
+                    self.logger.info("      request_ip:%s ->", arp_request_Ip)
+                    for key, value in self.request_queue[arp_request_Ip].items():
+                        self.logger.info("          %s in dpid %s", key, value)
+                self.logger.info("")
+
+        # miss the cache
+        else:
+            # append request to request_queue
+            self.logger.info("      miss cache,broadcast!")
+            if dst_ip in self.request_queue.keys():
+
+                self.request_queue[dst_ip].setdefault(src_ip, src_dpid)
+            else:
+                self.request_queue.setdefault(dst_ip, {src_ip: src_dpid})
+                # flood
+                arp_request = self.encapsulate_ARP_request(src_mac=broadcast_mac,
+                                                           src_ip=broadcast_ip,
+                                                           dst_ip=dst_ip)
+                actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD, 0)]
+                for sw_dpid in self.dpid2dp:
+                    self.logger.info("      broadcast to dpid:%s", sw_dpid)
+                    out = parser.OFPPacketOut(datapath=self.dpid2dp[sw_dpid],
+                                              buffer_id=self.dpid2dp[sw_dpid].ofproto.OFP_NO_BUFFER,
+                                              in_port=self.dpid2dp[sw_dpid].ofproto.OFPP_CONTROLLER,
+                                              actions=actions, data=arp_request.data)
+                    self.dpid2dp[sw_dpid].send_msg(out)
+
+            # print request_queue
+            self.logger.info("      request_queue:")
+            for arp_request_Ip in self.request_queue:
+                self.logger.info("      request_ip:%s ->", arp_request_Ip)
+                for key, value in self.request_queue[arp_request_Ip].items():
+                    self.logger.info("          %s in dpid %s", key, value)
+            self.logger.info("")
+
+    def arp_reply_handler(self, arp_packet):
+        src_ip = arp_packet.src_ip
+        src_mac = arp_packet.src_mac
+        src_dpid = self.hosts[src_mac].dpid
+        self.logger.info("      handling arp_reply!")
+        # find information of pending_ip and encapsulate the arp_reply and sent to the respective port of switch
+        # for pending_ip in self.request_queue[src_ip]:
+        while self.request_queue[src_ip].__len__() != 0:
+            # find information of pending_ip:
+            pending_ip, pending_dpid = self.request_queue[src_ip].popitem()
+            pending_mac = self.ip2host_info[pending_ip].mac
+            pending_port = self.hosts[pending_mac].port_no
+            self.logger.info("      find  pending_ip:%s, pending_mac:%s in dpid :%s in port:%s for requested_ip:%s",
+                             pending_ip, pending_mac, pending_dpid, pending_port, src_ip)
+
+            arp_reply = self.encapsulate_ARP_reply(src_mac=src_mac, src_ip=src_ip,
+                                                   dst_mac=pending_mac, dst_ip=pending_ip)
+
+            # encapsulate the arp_reply and sent to the respective port of switch
+            self.logger.info("      encapsulate ARP reply and sent to dpid:%s port:%s!\n", pending_dpid,
+                             pending_port)
+            actions = [self.dpid2dp[pending_dpid].ofproto_parser.OFPActionOutput(pending_port, 0)]
+            out = self.dpid2dp[pending_dpid].ofproto_parser.OFPPacketOut(
+                    datapath=self.dpid2dp[pending_dpid],
+                    buffer_id=self.dpid2dp[pending_dpid].ofproto.OFP_NO_BUFFER,
+                    in_port=self.dpid2dp[pending_dpid].ofproto.OFPP_CONTROLLER,
+                    actions=actions, data=arp_reply.data)
+
+            self.logger.info("      install flow from %s to %s", pending_mac, src_mac)
+            print"      install path..."
+            path = self.dijkstra(pending_dpid, src_dpid)
+            self.install_path_flow(pending_mac, src_mac, path)
+            print"      install finish!"
+            time.sleep(0.01)
+            self.dpid2dp[pending_dpid].send_msg(out)
+
+        self.request_queue.pop(src_ip)
+
+    def dijkstra(self, src_dpid, dst_dpid):
+        # init
+        if src_dpid == dst_dpid:
+            return [src_dpid]
+        distances = self.dp_map[src_dpid].copy()
+        finish = [src_dpid]
+        pre = {src_dpid: src_dpid}
+        for dst in distances:
+            if distances[dst] < float("inf"):
+                pre[dst] = src_dpid
+
+        while dst_dpid not in finish:
+            current = None
+            min_dis = float("inf")
+            # choose current
+            for dst in distances:
+                if dst not in finish and distances[dst] < min_dis:
+                    current = dst
+                    min_dis = distances[dst]
+            finish.append(current)
+            # update distances and pre
+            for dst in distances:
+                if dst not in finish and distances[dst] > distances[current] + self.dp_map[current][dst]:
+                    distances[dst] = distances[current] + self.dp_map[current][dst]
+                    pre[dst] = current
+
+        # find path
+        last = dst_dpid
+        path = []
+        while last != src_dpid:
+            path.append(last)
+            last = pre[last]
+        path.append(src_dpid)
+        path.reverse()
+        return path
+
+    def find_shortest_path(self, src, dst):  # find the shortest path from host_src to dst_src
+        src_dpid = self.hosts[src].dpid
+        dst_dpid = self.hosts[dst].dpid
+        path = self.dijkstra(src_dpid, dst_dpid)
+        return path
+
+    def _install_one_path_flow(self, dpid, src_mac, dst_mac, output):
+        dp = self.dpid2dp[dpid]
+        parser = dp.ofproto_parser
+        match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
+        actions = [parser.OFPActionOutput(output)]
+        self.logger.info("install flow to %s, match:dl_src=%s,dl_src=%s,output=%s",
+                         dpid, src_mac, dst_mac, output)
+        self.add_flow(dp, 9, match, actions)
+        return
+
+    def install_path_flow(self, src_mac, dst_mac, path):
+        for i in range(len(path)):
+            if i == len(path) - 1:  # for the access switch
+                output = self.hosts[dst_mac].port_no
+                dpid = path[i]
+                self._install_one_path_flow(dpid, src_mac, dst_mac, output)
+                return
+
+            dpid = path[i]
+            dst_dpid = path[i + 1]
+            output = self.links[(dpid, dst_dpid)][0]
+            self._install_one_path_flow(dpid, src_mac, dst_mac, output)
+
     def encapsulate_ARP_request(self, src_mac, src_ip, dst_ip):
         ARP = packet.Packet()
         ARP.add_protocol(ethernet.ethernet(dst="ff:ff:ff:ff:ff:ff", src=src_mac,
@@ -43,6 +284,31 @@ class ARP_proxy(app_manager.RyuApp):
                                     src_ip=src_ip, dst_mac="ff:ff:ff:ff:ff:ff", dst_ip=dst_ip))
         ARP.serialize()
         return ARP
+
+    def ip_register(self, pkt):
+        eth = pkt.get_protocols(ethernet.ethernet)[0]
+
+        host_mac = eth.src
+
+        # arp packet, update ip address
+        if eth.ethertype == ether_types.ETH_TYPE_ARP:
+            arp_pkt = pkt.get_protocols(arp.arp)[0]
+            host_ip = arp_pkt.src_ip
+            if host_ip in self.ip2host_info and self.ip2host_info[host_ip].mac == host_mac:
+                # the ip'mac have been recorded, then update the stamp
+                self.ip2host_info[host_ip].update_stamp()
+            else:
+                # the ip's mac have changed or haven't been recorded, then set the host_info to this ip
+                self.ip2host_info.setdefault(host_ip, Host_info(host_mac, host_ip))
+
+        # ipv4 packet, update ipv4 address
+        elif eth.ethertype == ether_types.ETH_TYPE_IP:
+            ipv4_pkt = pkt.get_protocols(ipv4.ipv4)[0]
+            host_ip = ipv4_pkt.src
+            if host_ip in self.ip2host_info:
+                self.ip2host_info[host_ip].update_stamp()
+            else:
+                self.ip2host_info.setdefault(host_ip, Host_info(host_mac, host_ip))
 
     def add_flow(self, datapath, priority, match, actions, table_id=0, buffer_id=None):
         ofproto = datapath.ofproto
@@ -58,24 +324,6 @@ class ARP_proxy(app_manager.RyuApp):
                                     instructions=inst)
         datapath.send_msg(mod)
 
-    def find_dpid_and_port_by_mac(self, mac):
-        for dpid in self.mac2Port:
-            if mac in self.mac2Port[dpid]:
-                return dpid, self.mac2Port[dpid][mac]
-
-    def printMac2Port(self, dpid):
-        self.logger.info("dpid=%d" % dpid)
-        for mac, port in self.mac2Port[dpid].items():
-            self.logger.info("mac=%s port=%d" % (mac, port))
-        self.logger.info("")
-
-    @set_ev_cls(events)
-    def get_topology(self, ev):
-        switch_list = get_switch(self, None)
-        for sw in  switch_list:
-
-            self.logger.info("switch:%s",sw.dp.id)
-
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         # set default= packetIn
@@ -84,7 +332,7 @@ class ARP_proxy(app_manager.RyuApp):
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
-        self.dpid2datapath[datapath.id] = datapath
+        self.dpid2dp[datapath.id] = datapath
 
         match = parser.OFPMatch()
         actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER, 0xff11)]
@@ -98,7 +346,7 @@ class ARP_proxy(app_manager.RyuApp):
         self.add_flow(datapath, 10, match_filter1, actions_filter1)
 
         # drop UDP      problem!!
-        match_filter2 = parser.OFPMatch(eth_type=0x0800, ip_proto=17)  ##slove the question  . to filter udp,
+        match_filter2 = parser.OFPMatch(eth_type=0x0800, ip_proto=17)  # solve the question  . to filter udp,
         # must not only indicate the udp(ip_proto=17)
         # but also indicate the IPV4(eth=0x0800)
         actions_filter2 = []
@@ -136,47 +384,85 @@ class ARP_proxy(app_manager.RyuApp):
         # mac learning
         dst = eth.dst
         src = eth.src
-
         dpid = datapath.id
-        self.mac2Port.setdefault(dpid, {})
-        self.logger.info("\npacket in dpid:%s src:%s dst:%s in_port:%s ", dpid, src, dst, in_port)
 
-        self.mac2Port[dpid][src] = in_port
-        self.logger.info("set mac:%s to dpid:%s port:%s", src, dpid, in_port)
-        self.logger.info("Current mac2Port for this switch")
-        self.printMac2Port(dpid)
+        if in_port in self.access_port[dpid]:
+            # host learning
+            self.ip_register(pkt)
+            self.hosts[src] = Host(dpid, in_port, src)
+
+        self.logger.info("\npacket in dpid:%s src:%s dst:%s in_port:%s ", dpid, src, dst, in_port)
 
         if eth.ethertype == ether_types.ETH_TYPE_ARP:
             # ARP handler
             self.logger.info("  handling arp!")
             arp_packet = pkt.get_protocol(arp.arp)
-            src_ip = arp_packet.src_ip
-            src_mac = arp_packet.src_mac
-            self.ip2mac[src_ip] = src_mac
-            self.logger.info("  Current ip2mac:")
-            for key, value in self.ip2mac.items():
-                self.logger.info("  %s->%s", key, value)
+
+            # print arp_table
+            self.logger.info("  Current arp_table:")
+            self.logger.info("     ip          mac          enabled")
+            for key, value in self.ip2host_info.items():
+                value.is_enable()
+                self.logger.info("  %s->%s  %s", key, value.mac,value.enabled)
             self.logger.info("")
+
             # arp_request
             if arp_packet.opcode == arp.ARP_REQUEST:
+                self.arp_request_handler(arp_packet)
                 self.logger.info("      handling arp_request!")
                 dst_ip = arp_packet.dst_ip
 
                 # hit the cache
-                if dst_ip in self.ip2mac:
-                    # encapsulate and ARP reply and sent
+                if dst_ip in self.ip2host_info:
                     self.logger.info("      hit cache!")
-                    dst_mac = self.ip2mac[dst_ip]
-                    arp_reply = self.encapsulate_ARP_reply(src_mac=dst_mac, src_ip=dst_ip,
-                                                           dst_mac=src_mac, dst_ip=src_ip)
+                    dst_mac = self.ip2host_info[dst_ip].mac
+                    if self.ip2host_info[dst_ip].is_enable():
+                        #  host_info enabled! encapsulate and ARP reply and sent
+                        self.logger.info("      the cache enbaled!")
+                        arp_reply = self.encapsulate_ARP_reply(src_mac=dst_mac, src_ip=dst_ip,
+                                                               dst_mac=src_mac, dst_ip=src_ip)
 
-                    self.logger.info("      encapsulate ARP reply and sent!\n")
-                    actions = [parser.OFPActionOutput(in_port, 0)]
-                    out = parser.OFPPacketOut(datapath=datapath,
-                                              buffer_id=ofproto.OFP_NO_BUFFER,
-                                              in_port=ofproto.OFPP_CONTROLLER,
-                                              actions=actions, data=arp_reply.data)
-                    datapath.send_msg(out)
+                        self.logger.info("      encapsulate ARP reply and sent!\n")
+                        actions = [parser.OFPActionOutput(in_port, 0)]
+                        out = parser.OFPPacketOut(datapath=self.dpid2dp[src_dpid],
+                                                  buffer_id=ofproto.OFP_NO_BUFFER,
+                                                  in_port=ofproto.OFPP_CONTROLLER,
+                                                  actions=actions, data=arp_reply.data)
+                        # install path
+                        print"      install path"
+                        path = self.find_shortest_path(src_mac, dst_mac)
+                        self.install_path_flow(src_mac, dst_mac, path)
+                        print"      install finish"
+                        # path.reverse()
+                        # self.install_path_flow(dst_mac, src_mac, path)
+                        time.sleep(0.01)
+                        datapath.send_msg(out)
+                    else:
+                        self.logger.info("          the cache disabled,sent request to the requested host")
+                        if dst_ip in self.request_queue.keys():
+                            self.request_queue[dst_ip].setdefault(src_ip, dpid)
+                        else:
+                            self.request_queue.setdefault(dst_ip, {src_ip: dpid})
+                            dst_port = self.hosts[dst_mac].port_no
+                            dst_dpid = self.hosts[dst_mac].dpid
+                            actions = [parser.OFPActionOutput(dst_port, 0)]
+                            print "          mac:", dst_mac
+                            print "          dpid:%s,port:%s" % (dst_dpid, dst_port)
+                            arp_request = self.encapsulate_ARP_request(src_mac=broadcast_mac,
+                                                                       src_ip=broadcast_ip,
+                                                                       dst_ip=dst_ip)
+                            out = parser.OFPPacketOut(datapath=self.dpid2dp[dst_dpid],
+                                                      buffer_id=ofproto.OFP_NO_BUFFER,
+                                                      in_port=ofproto.OFPP_CONTROLLER,
+                                                      actions=actions, data=arp_request.data)
+                            self.dpid2dp[dst_dpid].send_msg(out)
+                        # print request_queue
+                        self.logger.info("      request_queue:")
+                        for arp_request_Ip in self.request_queue:
+                            self.logger.info("      request_ip:%s ->", arp_request_Ip)
+                            for key, value in self.request_queue[arp_request_Ip].items():
+                                self.logger.info("          %s in dpid %s", key, value)
+                        self.logger.info("")
 
                 # miss the cache
                 else:
@@ -192,13 +478,13 @@ class ARP_proxy(app_manager.RyuApp):
                                                                    src_ip=broadcast_ip,
                                                                    dst_ip=dst_ip)
                         actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD, 0)]
-                        for sw_dpid in self.dpid2datapath:
+                        for sw_dpid in self.dpid2dp:
                             self.logger.info("      broadcast to dpid:%s", sw_dpid)
-                            out = parser.OFPPacketOut(datapath=self.dpid2datapath[sw_dpid],
-                                                      buffer_id=self.dpid2datapath[sw_dpid].ofproto.OFP_NO_BUFFER,
-                                                      in_port=self.dpid2datapath[sw_dpid].ofproto.OFPP_CONTROLLER,
+                            out = parser.OFPPacketOut(datapath=self.dpid2dp[sw_dpid],
+                                                      buffer_id=self.dpid2dp[sw_dpid].ofproto.OFP_NO_BUFFER,
+                                                      in_port=self.dpid2dp[sw_dpid].ofproto.OFPP_CONTROLLER,
                                                       actions=actions, data=arp_request.data)
-                            self.dpid2datapath[sw_dpid].send_msg(out)
+                            self.dpid2dp[sw_dpid].send_msg(out)
 
                     # print request_queue
                     self.logger.info("      request_queue:")
@@ -210,55 +496,6 @@ class ARP_proxy(app_manager.RyuApp):
 
             # arp_reply
             elif arp_packet.opcode == arp.ARP_REPLY:
-                self.logger.info("      handling arp_reply!")
-                # find information of pending_ip and encapsulate the arp_reply and sent to the respective port of switch
-                # for pending_ip in self.request_queue[src_ip]:
-                while self.request_queue[src_ip].__len__() != 0:
-                    # find information of pending_ip:
-                    pending_ip, pending_dpid = self.request_queue[src_ip].popitem()
-                    pending_mac = self.ip2mac[pending_ip]
-                    pending_port = self.mac2Port[pending_dpid][pending_mac]
-                    self.logger.info(
-                        "      find  pending_ip:%s, pending_mac:%s in dpid :%s in port:%s for requested_ip:%s",
-                        pending_ip, pending_mac, pending_dpid, pending_port, src_ip)
+                self.arp_reply_handler(arp_packet)
 
-                    arp_reply = self.encapsulate_ARP_reply(src_mac=src_mac, src_ip=src_ip,
-                                                           dst_mac=pending_mac, dst_ip=pending_ip)
-
-                    # encapsulate the arp_reply and sent to the respective port of switch
-                    self.logger.info("      encapsulate ARP reply and sent to dpid:%s port:%s!\n", pending_dpid,
-                                     pending_port)
-                    actions = [self.dpid2datapath[pending_dpid].ofproto_parser.OFPActionOutput(pending_port, 0)]
-                    out = self.dpid2datapath[pending_dpid].ofproto_parser.OFPPacketOut(
-                            datapath=self.dpid2datapath[pending_dpid],
-                            buffer_id=self.dpid2datapath[pending_dpid].ofproto.OFP_NO_BUFFER,
-                            in_port=self.dpid2datapath[pending_dpid].ofproto.OFPP_CONTROLLER,
-                            actions=actions, data=arp_reply.data)
-                    self.dpid2datapath[pending_dpid].send_msg(out)
-
-                self.request_queue.pop(src_ip)
-            return
-
-        if dst in self.mac2Port[dpid]:
-            out_put = self.mac2Port[dpid][dst]
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
-            actions = [parser.OFPActionOutput(out_put)]
-            self.logger.info("add flow to dpid:%s,in_port=%s,dl_dst=%s,ouput=%s",
-                             dpid, in_port, dst, out_put)
-            self.add_flow(datapath=datapath, priority=1, match=match,
-                          actions=actions)
-
-        elif dst == "ff:ff:ff:ff:ff:ff":
-            return
-        else:
-            out_put = ofproto.OFPP_FLOOD
-            self.logger.info("flood!")
-        actions = [parser.OFPActionOutput(out_put)]
-
-        data = None
-        if ev.msg.buffer_id == ofproto.OFP_NO_BUFFER:
-            data = ev.msg.data
-
-        out = parser.OFPPacketOut(datapath=datapath, buffer_id=ev.msg.buffer_id,
-                                  in_port=in_port, actions=actions, data=data)
-        datapath.send_msg(out)
+        return
