@@ -118,10 +118,11 @@ class ARP_proxy(app_manager.RyuApp):
                 print"      install path"
                 path = self.find_shortest_path(src_mac, dst_mac)
                 self.install_path_flow(src_mac, dst_mac, path)
+
+                path.reverse()
+                self.install_path_flow(dst_mac, src_mac, path)
                 print"      install finish"
-                # path.reverse()
-                # self.install_path_flow(dst_mac, src_mac, path)
-                time.sleep(0.01)
+                time.sleep(0.1)
                 datapath.send_msg(out)
             else:
                 if self.ip2host_info[dst_ip].is_expired():
@@ -132,17 +133,21 @@ class ARP_proxy(app_manager.RyuApp):
                     else:
                         self.request_queue.setdefault(dst_ip, {src_ip: src_dpid})
                     # flood
-                    arp_request = self.encapsulate_ARP_request(src_mac=broadcast_mac,
-                                                               src_ip=broadcast_ip,
-                                                               dst_ip=dst_ip)
-                    actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD, 0)]
                     for sw_dpid in self.dpid2dp:
-                        self.logger.info("      broadcast to dpid:%s", sw_dpid)
-                        out = parser.OFPPacketOut(datapath=self.dpid2dp[sw_dpid],
-                                                  buffer_id=self.dpid2dp[sw_dpid].ofproto.OFP_NO_BUFFER,
-                                                  in_port=self.dpid2dp[sw_dpid].ofproto.OFPP_CONTROLLER,
-                                                  actions=actions, data=arp_request.data)
-                        self.dpid2dp[sw_dpid].send_msg(out)
+                            print "      broadcast to dpid:%s to port:" % sw_dpid,
+                            arp_request = self.encapsulate_ARP_request(src_mac=src_mac,
+                                                                       src_ip=src_ip,
+                                                                       dst_ip=dst_ip)
+                            actions = []
+                            for access_port in self.access_port[sw_dpid]:
+                                actions.append(parser.OFPActionOutput(access_port, 0))
+                                print "%d" % access_port,
+                            out = parser.OFPPacketOut(datapath=self.dpid2dp[sw_dpid],
+                                                      buffer_id=self.dpid2dp[sw_dpid].ofproto.OFP_NO_BUFFER,
+                                                      in_port=self.dpid2dp[sw_dpid].ofproto.OFPP_CONTROLLER,
+                                                      actions=actions, data=arp_request.data)
+                            self.dpid2dp[sw_dpid].send_msg(out)
+                            print
 
                     self.ip2host_info.pop(dst_ip)  # delete the dst_ip
                 else:
@@ -158,8 +163,8 @@ class ARP_proxy(app_manager.RyuApp):
                         actions = [parser.OFPActionOutput(dst_port, 0)]
                         print "          mac:", dst_mac
                         print "          dpid:%s,port:%s" % (dst_dpid, dst_port)
-                        arp_request = self.encapsulate_ARP_request(src_mac=broadcast_mac,
-                                                                   src_ip=broadcast_ip,
+                        arp_request = self.encapsulate_ARP_request(src_mac=src_mac,
+                                                                   src_ip=src_ip,
                                                                    dst_ip=dst_ip)
                         out = parser.OFPPacketOut(datapath=self.dpid2dp[dst_dpid],
                                                   buffer_id=ofproto.OFP_NO_BUFFER,
@@ -182,18 +187,23 @@ class ARP_proxy(app_manager.RyuApp):
                 self.request_queue[dst_ip].setdefault(src_ip, src_dpid)
             else:
                 self.request_queue.setdefault(dst_ip, {src_ip: src_dpid})
-                # flood
-                arp_request = self.encapsulate_ARP_request(src_mac=broadcast_mac,
-                                                           src_ip=broadcast_ip,
-                                                           dst_ip=dst_ip)
-                actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD, 0)]
+                        # flood
                 for sw_dpid in self.dpid2dp:
-                    self.logger.info("      broadcast to dpid:%s", sw_dpid)
+                    print "      broadcast to dpid:%s to port:" % sw_dpid,
+                    arp_request = self.encapsulate_ARP_request(src_mac=src_mac,
+                                                               src_ip=src_ip,
+                                                               dst_ip=dst_ip)
+                    actions = []
+                    for access_port in self.access_port[sw_dpid]:
+                        actions.append(parser.OFPActionOutput(access_port, 0))
+                        print "%d" % access_port,
                     out = parser.OFPPacketOut(datapath=self.dpid2dp[sw_dpid],
                                               buffer_id=self.dpid2dp[sw_dpid].ofproto.OFP_NO_BUFFER,
                                               in_port=self.dpid2dp[sw_dpid].ofproto.OFPP_CONTROLLER,
                                               actions=actions, data=arp_request.data)
                     self.dpid2dp[sw_dpid].send_msg(out)
+                    print
+
 
             # print request_queue
             self.logger.info("      request_queue:")
@@ -202,6 +212,7 @@ class ARP_proxy(app_manager.RyuApp):
                 for key, value in self.request_queue[arp_request_Ip].items():
                     self.logger.info("          %s in dpid %s", key, value)
             self.logger.info("")
+            time.sleep(0.1)
 
     def arp_reply_handler(self, arp_packet):
         src_ip = arp_packet.src_ip
@@ -222,8 +233,7 @@ class ARP_proxy(app_manager.RyuApp):
                                                    dst_mac=pending_mac, dst_ip=pending_ip)
 
             # encapsulate the arp_reply and sent to the respective port of switch
-            self.logger.info("      encapsulate ARP reply and sent to dpid:%s port:%s!\n", pending_dpid,
-                             pending_port)
+
             actions = [self.dpid2dp[pending_dpid].ofproto_parser.OFPActionOutput(pending_port, 0)]
             out = self.dpid2dp[pending_dpid].ofproto_parser.OFPPacketOut(
                     datapath=self.dpid2dp[pending_dpid],
@@ -235,8 +245,12 @@ class ARP_proxy(app_manager.RyuApp):
             print"      install path..."
             path = self.dijkstra(pending_dpid, src_dpid)
             self.install_path_flow(pending_mac, src_mac, path)
+            path.reverse()
+            self.install_path_flow(src_mac, pending_mac, path)
             print"      install finish!"
-            time.sleep(0.01)
+            time.sleep(0.8)
+            self.logger.info("      encapsulate ARP reply and sent to dpid:%s port:%s!\n", pending_dpid,
+                             pending_port)
             self.dpid2dp[pending_dpid].send_msg(out)
 
         self.request_queue.pop(src_ip)

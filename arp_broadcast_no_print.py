@@ -86,7 +86,7 @@ class ARP_proxy(app_manager.RyuApp):
         return ARP
 
     def arp_request_handler(self, arp_packet):
-        self.logger.info("      handling arp_request!")
+        # self.logger.info("      handling arp_request!")
 
         # init
         src_ip = arp_packet.src_ip
@@ -100,33 +100,33 @@ class ARP_proxy(app_manager.RyuApp):
 
         # hit the cache
         if dst_ip in self.ip2host_info:
-            self.logger.info("      hit cache!")
+            # self.logger.info("      hit cache!")
             dst_mac = self.ip2host_info[dst_ip].mac
             if self.ip2host_info[dst_ip].is_enable():
                 #  host_info enabled! encapsulate and ARP reply and sent
-                self.logger.info("      the cache enbaled!")
+                # self.logger.info("      the cache enbaled!")
                 arp_reply = self.encapsulate_ARP_reply(src_mac=dst_mac, src_ip=dst_ip,
                                                        dst_mac=src_mac, dst_ip=src_ip)
 
-                self.logger.info("      encapsulate ARP reply and sent!\n")
+                # self.logger.info("      encapsulate ARP reply and sent!\n")
                 actions = [parser.OFPActionOutput(in_port, 0)]
                 out = parser.OFPPacketOut(datapath=self.dpid2dp[src_dpid],
                                           buffer_id=ofproto.OFP_NO_BUFFER,
                                           in_port=ofproto.OFPP_CONTROLLER,
                                           actions=actions, data=arp_reply.data)
                 # install path
-                print"      install path"
+                # print"      install path"
                 path = self.find_shortest_path(src_mac, dst_mac)
                 self.install_path_flow(src_mac, dst_mac, path)
-                print"      install finish"
+                # print"      install finish"
                 # path.reverse()
                 # self.install_path_flow(dst_mac, src_mac, path)
-                time.sleep(0.01)
+                time.sleep(0.005)
                 datapath.send_msg(out)
             else:
                 if self.ip2host_info[dst_ip].is_expired():
                     # expired
-                    self.logger.info("      cache is expired,delete ip:%s ,broadcast!", dst_ip)
+                    # self.logger.info("      cache is expired,delete ip:%s ,broadcast!", dst_ip)
                     if dst_ip in self.request_queue.keys():
                         self.request_queue[dst_ip].setdefault(src_ip, src_dpid)
                     else:
@@ -148,7 +148,7 @@ class ARP_proxy(app_manager.RyuApp):
                 else:
                     # disabled
                     self.ip2host_info[dst_ip].enabled = False
-                    self.logger.info("          the cache disabled,sent request to the requested host")
+                    # self.logger.info("          the cache disabled,sent request to the requested host")
                     if dst_ip in self.request_queue.keys():
                         self.request_queue[dst_ip].setdefault(src_ip, src_dpid)
                     else:
@@ -167,17 +167,17 @@ class ARP_proxy(app_manager.RyuApp):
                                                   actions=actions, data=arp_request.data)
                         self.dpid2dp[dst_dpid].send_msg(out)
                 # print request_queue
-                self.logger.info("      request_queue:")
-                for arp_request_Ip in self.request_queue:
-                    self.logger.info("      request_ip:%s ->", arp_request_Ip)
-                    for key, value in self.request_queue[arp_request_Ip].items():
-                        self.logger.info("          %s in dpid %s", key, value)
-                self.logger.info("")
+                # self.logger.info("      request_queue:")
+                # for arp_request_Ip in self.request_queue:
+                #     self.logger.info("      request_ip:%s ->", arp_request_Ip)
+                #     for key, value in self.request_queue[arp_request_Ip].items():
+                #         self.logger.info("          %s in dpid %s", key, value)
+                # self.logger.info("")
 
         # miss the cache
         else:
             # append request to request_queue
-            self.logger.info("      miss cache,broadcast!")
+            # self.logger.info("      miss cache,broadcast!")
             if dst_ip in self.request_queue.keys():
                 self.request_queue[dst_ip].setdefault(src_ip, src_dpid)
             else:
@@ -188,7 +188,7 @@ class ARP_proxy(app_manager.RyuApp):
                                                            dst_ip=dst_ip)
                 actions = [parser.OFPActionOutput(ofproto.OFPP_FLOOD, 0)]
                 for sw_dpid in self.dpid2dp:
-                    self.logger.info("      broadcast to dpid:%s", sw_dpid)
+                    # self.logger.info("      broadcast to dpid:%s", sw_dpid)
                     out = parser.OFPPacketOut(datapath=self.dpid2dp[sw_dpid],
                                               buffer_id=self.dpid2dp[sw_dpid].ofproto.OFP_NO_BUFFER,
                                               in_port=self.dpid2dp[sw_dpid].ofproto.OFPP_CONTROLLER,
@@ -196,18 +196,18 @@ class ARP_proxy(app_manager.RyuApp):
                     self.dpid2dp[sw_dpid].send_msg(out)
 
             # print request_queue
-            self.logger.info("      request_queue:")
-            for arp_request_Ip in self.request_queue:
-                self.logger.info("      request_ip:%s ->", arp_request_Ip)
-                for key, value in self.request_queue[arp_request_Ip].items():
-                    self.logger.info("          %s in dpid %s", key, value)
-            self.logger.info("")
+            # self.logger.info("      request_queue:")
+            # for arp_request_Ip in self.request_queue:
+            #     self.logger.info("      request_ip:%s ->", arp_request_Ip)
+            #     for key, value in self.request_queue[arp_request_Ip].items():
+            #         self.logger.info("          %s in dpid %s", key, value)
+            # self.logger.info("")
 
     def arp_reply_handler(self, arp_packet):
         src_ip = arp_packet.src_ip
         src_mac = arp_packet.src_mac
         src_dpid = self.hosts[src_mac].dpid
-        self.logger.info("      handling arp_reply!")
+        # self.logger.info("      handling arp_reply!")
         # find information of pending_ip and encapsulate the arp_reply and sent to the respective port of switch
         # for pending_ip in self.request_queue[src_ip]:
         while self.request_queue[src_ip].__len__() != 0:
@@ -215,15 +215,15 @@ class ARP_proxy(app_manager.RyuApp):
             pending_ip, pending_dpid = self.request_queue[src_ip].popitem()
             pending_mac = self.ip2host_info[pending_ip].mac
             pending_port = self.hosts[pending_mac].port_no
-            self.logger.info("      find  pending_ip:%s, pending_mac:%s in dpid :%s in port:%s for requested_ip:%s",
-                             pending_ip, pending_mac, pending_dpid, pending_port, src_ip)
+            # self.logger.info("      find  pending_ip:%s, pending_mac:%s in dpid :%s in port:%s for requested_ip:%s",
+            #                  pending_ip, pending_mac, pending_dpid, pending_port, src_ip)
 
             arp_reply = self.encapsulate_ARP_reply(src_mac=src_mac, src_ip=src_ip,
                                                    dst_mac=pending_mac, dst_ip=pending_ip)
 
             # encapsulate the arp_reply and sent to the respective port of switch
-            self.logger.info("      encapsulate ARP reply and sent to dpid:%s port:%s!\n", pending_dpid,
-                             pending_port)
+            # self.logger.info("      encapsulate ARP reply and sent to dpid:%s port:%s!\n", pending_dpid,
+            #                  pending_port)
             actions = [self.dpid2dp[pending_dpid].ofproto_parser.OFPActionOutput(pending_port, 0)]
             out = self.dpid2dp[pending_dpid].ofproto_parser.OFPPacketOut(
                     datapath=self.dpid2dp[pending_dpid],
@@ -231,12 +231,12 @@ class ARP_proxy(app_manager.RyuApp):
                     in_port=self.dpid2dp[pending_dpid].ofproto.OFPP_CONTROLLER,
                     actions=actions, data=arp_reply.data)
 
-            self.logger.info("      install flow from %s to %s", pending_mac, src_mac)
-            print"      install path..."
+            # self.logger.info("      install flow from %s to %s", pending_mac, src_mac)
+            # print"      install path..."
             path = self.dijkstra(pending_dpid, src_dpid)
             self.install_path_flow(pending_mac, src_mac, path)
-            print"      install finish!"
-            time.sleep(0.01)
+            # print"      install finish!"
+            time.sleep(0.005)
             self.dpid2dp[pending_dpid].send_msg(out)
 
         self.request_queue.pop(src_ip)
@@ -288,8 +288,8 @@ class ARP_proxy(app_manager.RyuApp):
         parser = dp.ofproto_parser
         match = parser.OFPMatch(eth_src=src_mac, eth_dst=dst_mac)
         actions = [parser.OFPActionOutput(output)]
-        self.logger.info("install flow to %s, match:dl_src=%s,dl_src=%s,output=%s",
-                         dpid, src_mac, dst_mac, output)
+        # self.logger.info("install flow to %s, match:dl_src=%s,dl_src=%s,output=%s",
+        #                  dpid, src_mac, dst_mac, output)
         self.add_flow(dp, 9, match, actions)
         return
 
@@ -420,20 +420,20 @@ class ARP_proxy(app_manager.RyuApp):
             self.ip_register(pkt)
             self.hosts[src] = Host(dpid, in_port, src)
 
-        self.logger.info("\npacket in dpid:%s src:%s dst:%s in_port:%s ", dpid, src, dst, in_port)
+        # self.logger.info("\npacket in dpid:%s src:%s dst:%s in_port:%s ", dpid, src, dst, in_port)
 
         if eth.ethertype == ether_types.ETH_TYPE_ARP:
             # ARP handler
-            self.logger.info("  handling arp!")
+            # self.logger.info("  handling arp!")
             arp_packet = pkt.get_protocol(arp.arp)
 
             # print arp_table
-            self.logger.info("  Current arp_table:")
-            self.logger.info("     ip          mac          enabled")
-            for key, value in self.ip2host_info.items():
-                value.is_enable()
-                self.logger.info("  %s->%s  %s", key, value.mac, value.enabled)
-            self.logger.info("")
+            # self.logger.info("  Current arp_table:")
+            # self.logger.info("     ip          mac          enabled")
+            # for key, value in self.ip2host_info.items():
+            #     value.is_enable()
+            #     self.logger.info("  %s->%s  %s", key, value.mac, value.enabled)
+            # self.logger.info("")
 
             # arp_request
             if arp_packet.opcode == arp.ARP_REQUEST:
