@@ -10,8 +10,8 @@ import PP_network_awareness
 
 broadcast_mac = "88:88:88:88:88:88"  # special MAC to sent arp_request by controller
 broadcast_ip = '10.10.10.10'  # special IP to sent arp_request by controller
-enable_time = 10
-expired_time = 20
+enable_time = 10000
+expired_time = 20000
 # todo:delete the print and logger,decrease the time,install one direct path
 
 class Host(object):
